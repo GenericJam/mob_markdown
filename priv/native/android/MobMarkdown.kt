@@ -1,14 +1,19 @@
 package io.mob.markdown
 
 import android.content.Context
+import android.graphics.Paint
 import android.graphics.Typeface
 import android.text.Spannable
+import android.text.SpannableStringBuilder
+import android.text.Spanned
 import android.text.TextPaint
 import android.text.method.ArrowKeyMovementMethod
 import android.text.style.ClickableSpan
 import android.text.style.ForegroundColorSpan
+import android.text.style.LineHeightSpan
 import android.text.style.MetricAffectingSpan
 import android.text.style.RelativeSizeSpan
+import android.text.style.URLSpan
 import android.text.util.Linkify
 import android.util.TypedValue
 import android.view.MotionEvent
@@ -27,11 +32,13 @@ import io.noties.markwon.core.CoreProps
 import io.noties.markwon.core.MarkwonTheme
 import io.noties.markwon.ext.strikethrough.StrikethroughPlugin
 import io.noties.markwon.ext.tables.TablePlugin
+import io.noties.markwon.ext.tables.TableRowSpan
 import io.noties.markwon.html.HtmlPlugin
 import io.noties.markwon.linkify.LinkifyPlugin
 import org.commonmark.node.Emphasis
 import org.commonmark.node.Heading
 import org.commonmark.node.StrongEmphasis
+import kotlin.math.roundToInt
 
 // The Android side of MobMarkdown.View (see the MobMarkdown moduledoc for the
 // props). Markwon renders the Markdown to Spannables in a selectable
@@ -147,6 +154,7 @@ internal object MobMarkdown {
                         .blockQuoteColor(style.quoteColor)
                         .listItemColor(style.quoteColor)
                         .thematicBreakColor(style.ruleColor)
+                        .thematicBreakHeight(px(1f).toInt().coerceAtLeast(1))
                         .headingBreakHeight(0)
                 }
 
@@ -175,8 +183,64 @@ internal object MobMarkdown {
             .build()
     }
 
+    /** `text` parsed, with the line height on its lines of text (see LineSpacing). */
+    fun render(context: Context, style: MdStyle, text: String): Spanned {
+        val parsed = SpannableStringBuilder(markwon(context, style).toMarkdown(text))
+        dropBareDomainLinks(parsed)
+        parsed.setSpan(LineSpacing(style.lineHeight), 0, parsed.length, Spanned.SPAN_INCLUSIVE_INCLUSIVE)
+        return parsed
+    }
+
+    // Linkify's WEB_URLS also links a bare name with a dot in a known TLD
+    // ("Task.Supervised.run", "Bezalel.Dyn.G3.NetProbe.run/2" in a stack
+    // trace) by putting "http://" in front. Keep links written as links, URLs
+    // with a scheme and www. names (GitHub's autolinks, what iOS links).
+    private fun dropBareDomainLinks(text: SpannableStringBuilder) {
+        for (span in text.getSpans(0, text.length, URLSpan::class.java)) {
+            val shown = text.subSequence(text.getSpanStart(span), text.getSpanEnd(span)).toString()
+            if (span.url == "http://$shown" && !shown.startsWith("www.", ignoreCase = true)) {
+                text.removeSpan(span)
+            }
+        }
+    }
+
     private const val CODE_SCALE = 0.9f
-    private val HEADING_SIZES = floatArrayOf(1.3f, 1.18f, 1.08f, 1f, 1f, 1f)
+    private val HEADING_SIZES = floatArrayOf(1.45f, 1.3f, 1.18f, 1.08f, 1f, 1f)
+}
+
+// The line height, on lines of text only. TextView's own multiplier would
+// also stretch each table row (one line, drawn by Markwon's TableRowSpan, as
+// tall as its wrapped cells) and the blank line between blocks.
+//
+// StaticLayout carries the metrics a line ends with into the next line of
+// the same style run, so `fm` may arrive as this span left it: then the
+// line's own metrics are the ones it had before, or the spacing would
+// compound line after line. Half the extra goes above the text, half below,
+// so an inline code background stays centred on its text.
+private class LineSpacing(private val multiplier: Float) : LineHeightSpan {
+    private var inAscent = 0
+    private var inDescent = 0
+    private var outAscent = 0
+    private var outDescent = 0
+
+    override fun chooseHeight(
+        text: CharSequence, start: Int, end: Int, spanstartv: Int, lineHeight: Int, fm: Paint.FontMetricsInt,
+    ) {
+        if (multiplier <= 1f || (start until end).all { text[it].isWhitespace() }) return
+        if (text is Spanned && text.getSpans(start, end, TableRowSpan::class.java).isNotEmpty()) return
+        val carried = fm.ascent == outAscent && fm.descent == outDescent
+        val ascent = if (carried) inAscent else fm.ascent
+        val descent = if (carried) inDescent else fm.descent
+        val extra = ((descent - ascent) * (multiplier - 1f)).roundToInt()
+        fm.ascent = ascent - extra / 2
+        fm.descent = descent + (extra - extra / 2)
+        fm.top = minOf(fm.top, fm.ascent)
+        fm.bottom = maxOf(fm.bottom, fm.descent)
+        inAscent = ascent
+        inDescent = descent
+        outAscent = fm.ascent
+        outDescent = fm.descent
+    }
 }
 
 internal data class MdStyle(
@@ -325,7 +389,7 @@ fun MobMarkdownView(props: Map<String, Any?>, send: MobMarkdownSend) {
             if (holder.style != style) {
                 tv.typeface = MobMarkdown.faces(tv.context, style).regular
                 tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, style.textSize)
-                tv.setLineSpacing(0f, style.lineHeight)
+                tv.setLineSpacing(0f, 1f)
                 tv.setTextColor(style.textColor)
                 tv.setLinkTextColor(style.linkColor)
                 tv.highlightColor = (style.selectionColor and 0x00FFFFFF) or 0x66000000
@@ -333,7 +397,8 @@ fun MobMarkdownView(props: Map<String, Any?>, send: MobMarkdownSend) {
                 holder.text = null
             }
             if (holder.text != text) {
-                MobMarkdown.markwon(tv.context, style).setMarkdown(tv, text)
+                MobMarkdown.markwon(tv.context, style)
+                    .setParsedMarkdown(tv, MobMarkdown.render(tv.context, style, text))
                 holder.text = text
             }
         },

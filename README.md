@@ -33,7 +33,7 @@ stable across renders. Every prop is optional.
 | `line_height` | multiplier | 1.4 |
 | `text_color`, `heading_color`, `link_color`, `code_color`, `code_background`, `quote_color`, `rule_color`, `selection_color` | ARGB integers (`0xAARRGGBB`); `quote_color` also marks list items, `rule_color` draws rules and table borders | dark text on light |
 | `font_regular`, `font_bold`, `font_italic`, `font_bold_italic` | body faces | the system face; a missing italic is slanted from the upright face |
-| `font_heading` | headings (sized 1.3×, 1.18×, 1.08× for levels 1–3) | the bold face |
+| `font_heading` | headings (sized 1.45×, 1.3×, 1.18×, 1.08× for levels 1–4) | the bold face |
 | `font_code` | inline code, code blocks, iOS tables | the system monospace, at 0.9× |
 
 Faces are named the way each platform loads them: an iOS PostScript name, an

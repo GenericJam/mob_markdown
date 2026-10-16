@@ -221,7 +221,7 @@ struct MobMdRenderer {
         faces[(bold ? 1 : 0) + (italic ? 2 : 0)]
     }
 
-    private static let headingSizes: [CGFloat] = [1.3, 1.18, 1.08, 1, 1, 1]
+    private static let headingSizes: [CGFloat] = [1.45, 1.3, 1.18, 1.08, 1, 1]
     private static let bullets = ["•", "◦", "▪"]
     private static let tagPattern = try! NSRegularExpression(pattern: "^<(/?)([a-zA-Z][a-zA-Z0-9]*)[^>]*?(/?)>$")
     private static let anyTag = try! NSRegularExpression(pattern: "<[^>]*>")
