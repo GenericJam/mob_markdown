@@ -86,15 +86,19 @@ internal object MobMarkdown {
     private var faces: MdFaces? = null
     private var facesKey: List<String>? = null
     // One Markwon per style in use (an app may interleave a few, e.g. a
-    // reply's and an aside's); cleared if styles keep changing.
-    private val markwons = HashMap<MdStyle, Markwon>()
+    // reply's and an aside's), with and without Linkify; cleared if styles
+    // keep changing.
+    private val markwons = HashMap<Pair<MdStyle, Boolean>, Markwon>()
 
-    // Main thread only (Compose).
-    fun markwon(context: Context, style: MdStyle): Markwon {
-        markwons[style]?.let { return it }
+    // Main thread only (Compose). Tables get no Linkify: their cells keep
+    // links of their own (TableRowSpan), out of dropBareDomainLinks' reach,
+    // so a module name in a cell would turn into a web link.
+    fun markwon(context: Context, style: MdStyle, linkify: Boolean = true): Markwon {
+        val key = style to linkify
+        markwons[key]?.let { return it }
         if (markwons.size >= MAX_STYLES) markwons.clear()
-        val built = build(context.applicationContext, style, faces(context, style))
-        markwons[style] = built
+        val built = build(context.applicationContext, style, faces(context, style), linkify)
+        markwons[key] = built
         return built
     }
 
@@ -142,7 +146,7 @@ internal object MobMarkdown {
         }
     }
 
-    private fun build(ctx: Context, style: MdStyle, faces: MdFaces): Markwon {
+    private fun build(ctx: Context, style: MdStyle, faces: MdFaces, linkify: Boolean): Markwon {
         val px = { sp: Float ->
             TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, sp, ctx.resources.displayMetrics)
         }
@@ -150,7 +154,7 @@ internal object MobMarkdown {
         val codePx = px(style.textSize * CODE_SCALE).toInt()
         val pad = px(style.textSize / 2).toInt()
 
-        return Markwon.builder(ctx)
+        val builder = Markwon.builder(ctx)
             .usePlugin(StrikethroughPlugin.create())
             .usePlugin(TablePlugin.create(TablePlugin.ThemeConfigure { b ->
                 b.tableBorderColor(style.ruleColor)
@@ -160,7 +164,8 @@ internal object MobMarkdown {
                     .tableEvenRowBackgroundColor(0)
                     .tableOddRowBackgroundColor(0)
             }))
-            .usePlugin(LinkifyPlugin.create(Linkify.WEB_URLS or Linkify.EMAIL_ADDRESSES))
+        if (linkify) builder.usePlugin(LinkifyPlugin.create(Linkify.WEB_URLS or Linkify.EMAIL_ADDRESSES))
+        return builder
             .usePlugin(HtmlPlugin.create())
             .usePlugin(object : AbstractMarkwonPlugin() {
                 override fun configureTheme(builder: MarkwonTheme.Builder) {
@@ -219,7 +224,7 @@ internal object MobMarkdown {
         val out = mutableListOf<MdSegment>()
         var prose: Document? = null
         fun closeProse() {
-            prose?.let { out.add(MdSegment.Prose(prose(markwon, style, it))) }
+            prose?.let { out.add(MdSegment.Prose(prose(markwon, style, it), key(it))) }
             prose = null
         }
         for (node in generateSequence(doc.firstChild) { it.next }.toList()) {
@@ -227,7 +232,9 @@ internal object MobMarkdown {
             if (node is TableBlock) {
                 closeProse()
                 val width = naturalWidth(context, style, node)
-                out.add(MdSegment.Table(trimmed(markwon.render(Document().apply { appendChild(node) })), width))
+                val table = Document().apply { appendChild(node) }
+                val key = key(table)
+                out.add(MdSegment.Table(trimmed(markwon(context, style, linkify = false).render(table)), width, key))
             } else {
                 (prose ?: Document().also { prose = it }).appendChild(node)
             }
@@ -254,7 +261,7 @@ internal object MobMarkdown {
 
     // The width Markwon's table needs to show each column's cells unwrapped
     // (up to MAX_COLUMN code columns, past which they wrap): TableRowSpan
-    // splits its width evenly, so the sum of the columns' widths, each with
+    // splits its width evenly, so every column as wide as the widest, with
     // its padding.
     private fun naturalWidth(context: Context, style: MdStyle, table: TableBlock): Int {
         val metrics = context.resources.displayMetrics
@@ -280,8 +287,35 @@ internal object MobMarkdown {
 
             override fun visit(node: CustomBlock) = visitChildren(node)
         })
+        // TableRowSpan gives every column width / n: each needs the widest's.
         val padding = px(style.textSize / 2) * 2 + px(1f)
-        return widths.values.sumOf { (it + padding).toDouble() }.toInt() + px(1f).toInt() + 1
+        val widest = widths.values.maxOrNull() ?: return 0
+        return ((widest + padding) * widths.size).toInt() + px(1f).toInt() + 1
+    }
+
+    // What a segment shows, as its nodes and their text: the rendered string
+    // alone misses a table cell growing in place (a row is one no-break space
+    // drawn by its span) and a span-only change.
+    private fun key(node: Node): String {
+        val out = StringBuilder()
+        fun walk(n: Node) {
+            out.append('<').append(n.javaClass.simpleName)
+            when (n) {
+                is Text -> out.append(':').append(n.literal)
+                is Code -> out.append(':').append(n.literal)
+                is org.commonmark.node.FencedCodeBlock -> out.append(':').append(n.literal)
+                is org.commonmark.node.IndentedCodeBlock -> out.append(':').append(n.literal)
+                is org.commonmark.node.HtmlInline -> out.append(':').append(n.literal)
+                is org.commonmark.node.HtmlBlock -> out.append(':').append(n.literal)
+                is org.commonmark.node.Link -> out.append(':').append(n.destination)
+                is Heading -> out.append(':').append(n.level)
+                else -> {}
+            }
+            generateSequence(n.firstChild) { it.next }.forEach(::walk)
+            out.append('>')
+        }
+        walk(node)
+        return out.toString()
     }
 
     private fun plain(node: Node): String {
@@ -307,7 +341,7 @@ internal object MobMarkdown {
     }
 
     private const val CODE_SCALE = 0.9f
-    private const val MAX_STYLES = 4
+    private const val MAX_STYLES = 8
     /** The widest a table column grows, in code columns (iOS draws the same). */
     private const val MAX_COLUMN = 32
     private val HEADING_SIZES = floatArrayOf(1.45f, 1.3f, 1.18f, 1.08f, 1f, 1f)
@@ -436,8 +470,8 @@ private class HeadingSpan(private val face: Typeface) : MetricAffectingSpan() {
 }
 
 internal sealed class MdSegment {
-    class Prose(val text: Spanned) : MdSegment()
-    class Table(val text: Spanned, val width: Int) : MdSegment()
+    class Prose(val text: Spanned, val key: String) : MdSegment()
+    class Table(val text: Spanned, val width: Int, val key: String) : MdSegment()
 }
 
 // A text view's state: what it last showed, and the `send` of its latest
@@ -498,11 +532,11 @@ fun MobMarkdownView(props: Map<String, Any?>, send: MobMarkdownSend) {
         Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(gap)) {
             for (segment in segments) {
                 when (segment) {
-                    is MdSegment.Prose -> MdText(segment.text, style, send, Modifier.fillMaxWidth())
+                    is MdSegment.Prose -> MdText(segment.text, segment.key, style, send, Modifier.fillMaxWidth())
                     is MdSegment.Table -> {
                         val width = with(density) { maxOf(viewWidth, segment.width).toDp() }
                         Box(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())) {
-                            MdText(segment.text, style, send, Modifier.width(width))
+                            MdText(segment.text, segment.key, style, send, Modifier.width(width))
                         }
                     }
                 }
@@ -512,7 +546,7 @@ fun MobMarkdownView(props: Map<String, Any?>, send: MobMarkdownSend) {
 }
 
 @Composable
-private fun MdText(text: Spanned, style: MdStyle, send: MobMarkdownSend, modifier: Modifier) {
+private fun MdText(text: Spanned, key: String, style: MdStyle, send: MobMarkdownSend, modifier: Modifier) {
     AndroidView(
         modifier = modifier,
         factory = { ctx ->
@@ -537,10 +571,10 @@ private fun MdText(text: Spanned, style: MdStyle, send: MobMarkdownSend, modifie
                 holder.style = style
                 holder.shown = null
             }
-            val shown = text.toString()
-            if (holder.shown != shown) {
+            if (holder.shown != key) {
+                // Linkify adds nothing at set time: either instance applies the plugins.
                 MobMarkdown.markwon(tv.context, style).setParsedMarkdown(tv, text)
-                holder.shown = shown
+                holder.shown = key
             }
         },
     )

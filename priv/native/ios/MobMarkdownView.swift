@@ -376,6 +376,10 @@ struct MobMdRenderer {
         if case .rule = state.blockKind {
             if state.ruled != state.block {
                 state.ruled = state.block
+                // A quote bar or list indent the rule's block began with has
+                // no line to stand on (the separator before it is trimmed).
+                let prefix = NSRange(location: state.blockStart, length: state.out.length - state.blockStart)
+                if prefix.length > 0 { state.out.deleteCharacters(in: prefix) }
                 closeText(&state)
                 state.segments.append(.rule)
             }
