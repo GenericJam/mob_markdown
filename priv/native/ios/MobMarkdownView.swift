@@ -1,27 +1,86 @@
 import SwiftUI
+import CoreText
 import UIKit
 
 // The iOS side of MobMarkdown.View (see the MobMarkdown moduledoc for the
 // props), the counterpart of MobMarkdown.kt: Foundation's Markdown parser
-// (CommonMark + GFM tables, strikethrough and autolinks) into an attributed
-// string in a read-only, selectable UITextView, so inline styles wrap like
+// (CommonMark + GFM tables, strikethrough and autolinks) into attributed
+// strings in read-only, selectable UITextViews, so inline styles wrap like
 // prose and any range can be drag-selected and copied.
 //
-// UIKit has no table layout for attributed text, so tables are drawn as
-// box-drawing text in the code (monospace) face, columns shrunk widest-first
-// to the view's width and cells wrapped inside their column; they select and
-// copy as text. Rules are drawn the same way.
+// The text is cut into segments at tables and rules. Prose wraps to the
+// view's width. UIKit has no table layout for attributed text, so a table is
+// box-drawing text in the code (monospace) face at its natural width (a
+// column grows to its widest cell, up to MobMdRenderer.maxColumn code
+// columns, past which its cells wrap) in a horizontal scroller of its own:
+// a table wider than the view scrolls sideways, a narrower one sits still.
+// Tables select and copy as text. A rule is a hairline.
 //
 // mob_dev's generated mob_register_plugins() registers this struct under
 // "MobMarkdown_View" and hands it only the props, so link taps reach the BEAM
 // through mob_send_component_event with the props' component_handle (what
 // MobNativeViewRegistry's own send closure calls).
 //
-// A view's text view is created once and only re-rendered when its `text`,
-// style props or width in code columns change (a streaming reply grows a few
-// times a second; finished ones never change).
-struct MobMarkdownView: UIViewRepresentable {
+// The segments are re-rendered only when `text` or the style props change
+// (a streaming reply grows a few times a second; finished ones never
+// change), and a segment's text view only takes new text when its own text
+// changed.
+struct MobMarkdownView: View {
     let props: [String: Any]
+    @StateObject private var cache = MobMdCache()
+
+    var body: some View {
+        let style = MobMdStyle(props)
+        let handle = mobMarkdownInt(props["component_handle"]) ?? -1
+        let segments = cache.segments(props["text"] as? String ?? "", style: style)
+        VStack(alignment: .leading, spacing: style.textSize * 0.8) {
+            ForEach(segments.indices, id: \.self) { index in
+                switch segments[index] {
+                case let .text(text):
+                    MobMdTextView(text: text, style: style, handle: handle, wraps: true)
+                case let .table(text):
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        MobMdTextView(text: text, style: style, handle: handle, wraps: false)
+                    }
+                    .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
+                case .rule:
+                    Rectangle().fill(Color(style.ruleColor)).frame(height: 1).frame(maxWidth: .infinity)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+enum MobMdSegment {
+    case text(NSAttributedString)
+    case table(NSAttributedString)
+    case rule
+}
+
+/// A view's last rendered text and style and the segments they made.
+final class MobMdCache: ObservableObject {
+    private var text: String?
+    private var style: MobMdStyle?
+    private var rendered: [MobMdSegment] = []
+
+    func segments(_ text: String, style: MobMdStyle) -> [MobMdSegment] {
+        if text != self.text || style != self.style {
+            self.text = text
+            self.style = style
+            rendered = MobMdRenderer(style: style).render(text)
+        }
+        return rendered
+    }
+}
+
+/// One segment's selectable text: prose wraps to the offered width, a table
+/// keeps its own width (its scroller offers none).
+struct MobMdTextView: UIViewRepresentable {
+    let text: NSAttributedString
+    let style: MobMdStyle
+    let handle: Int
+    let wraps: Bool
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -43,52 +102,33 @@ struct MobMarkdownView: UIViewRepresentable {
 
     func updateUIView(_ view: UITextView, context: Context) {
         let coordinator = context.coordinator
-        coordinator.handle = mobMarkdownInt(props["component_handle"]) ?? -1
-        coordinator.update(view, text: props["text"] as? String ?? "", style: MobMdStyle(props))
+        coordinator.handle = handle
+        if coordinator.style != style {
+            coordinator.style = style
+            view.tintColor = style.selectionColor
+            view.linkTextAttributes = [
+                .foregroundColor: style.linkColor,
+                .underlineStyle: NSUnderlineStyle.single.rawValue,
+            ]
+        }
+        if !view.attributedText.isEqual(to: text) { view.attributedText = text }
     }
 
     func sizeThatFits(_ proposal: ProposedViewSize, uiView view: UITextView, context: Context) -> CGSize? {
+        guard wraps else {
+            let fitted = view.sizeThatFits(CGSize(width: CGFloat.greatestFiniteMagnitude,
+                                                  height: CGFloat.greatestFiniteMagnitude))
+            return CGSize(width: ceil(fitted.width) + 1, height: ceil(fitted.height))
+        }
         let width = proposal.width.flatMap { $0.isFinite && $0 > 0 ? $0 : nil }
             ?? view.window?.bounds.width ?? UIScreen.main.bounds.width
-        context.coordinator.layout(view, width: width)
         let fitted = view.sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude))
         return CGSize(width: width, height: ceil(fitted.height))
     }
 
     final class Coordinator: NSObject, UITextViewDelegate {
         var handle = -1
-        private var text: String?
-        private var style: MobMdStyle?
-        private var columns = 0
-
-        func update(_ view: UITextView, text: String, style: MobMdStyle) {
-            if style != self.style {
-                view.tintColor = style.selectionColor
-                view.linkTextAttributes = [
-                    .foregroundColor: style.linkColor,
-                    .underlineStyle: NSUnderlineStyle.single.rawValue,
-                ]
-            }
-            guard text != self.text || style != self.style else { return }
-            self.text = text
-            self.style = style
-            render(view)
-        }
-
-        /// Called with the width SwiftUI offers; re-renders only when the
-        /// view's width in code columns changes (tables and rules depend on it).
-        func layout(_ view: UITextView, width: CGFloat) {
-            guard let style else { return }
-            let columns = max(1, Int((width / style.codeCharWidth).rounded(.down)))
-            guard columns != self.columns else { return }
-            self.columns = columns
-            render(view)
-        }
-
-        private func render(_ view: UITextView) {
-            guard let text, let style else { return }
-            view.attributedText = MobMdRenderer(style: style, columns: columns > 0 ? columns : 40).render(text)
-        }
+        var style: MobMdStyle?  // the style the view's tint and links are in
 
         // Links go to the BEAM (MobMarkdown.View handles "open_link" and
         // opens only web and mail links): never let UIKit open the text's
@@ -182,39 +222,50 @@ struct MobMdStyle: Equatable {
         mobMarkdownFont(fontHeading, size: size) ?? face(bold: true, italic: false, size: size)
     }
 
+    /// Scripts the monospace face lacks (Hebrew) fall back to the system
+    /// text face rather than a fixed-pitch one that spaces their letters apart.
     func code(bold: Bool = false) -> UIFont {
+        let font: UIFont
         if let named = mobMarkdownFont(fontCode, size: codeSize) {
-            return bold ? (mobMarkdownWithTraits(named, .traitBold) ?? named) : named
+            font = bold ? (mobMarkdownWithTraits(named, .traitBold) ?? named) : named
+        } else {
+            font = .monospacedSystemFont(ofSize: codeSize, weight: bold ? .semibold : .regular)
         }
-        return .monospacedSystemFont(ofSize: codeSize, weight: bold ? .semibold : .regular)
+        let fallback = UIFont.systemFont(ofSize: codeSize, weight: bold ? .semibold : .regular).fontDescriptor
+        return UIFont(descriptor: font.fontDescriptor.addingAttributes([.cascadeList: [fallback]]), size: codeSize)
     }
 
-    /// The advance of one character of the code face: the width of a table
-    /// or rule column.
+    /// The advance of one character of the code face: one table column.
     var codeCharWidth: CGFloat {
         ("0" as NSString).size(withAttributes: [.font: code()]).width
     }
 }
 
-/// Markdown to an attributed string for one view: Foundation's parse, then
-/// one pass over its runs laying out blocks, lists, quotes and tables.
+/// Markdown to segments for one view: Foundation's parse, then one pass over
+/// its runs laying out blocks, lists, quotes and tables.
 struct MobMdRenderer {
+    /// The widest a table column grows, in code columns; longer cells wrap.
+    static let maxColumn = 32
+
     let style: MobMdStyle
-    let columns: Int  // the view's width in code-face characters
     private let faces: [UIFont]  // regular, bold, italic, bold italic at the text size
     private let regular: UIFont
     private let code: UIFont
     private let codeBold: UIFont
+    private let charWidth: CGFloat   // one code column, in points
+    private let spaceWidth: CGFloat  // a space in the code face
 
-    init(style: MobMdStyle, columns: Int) {
+    init(style: MobMdStyle) {
         self.style = style
-        self.columns = columns
         faces = [(false, false), (true, false), (false, true), (true, true)].map {
             style.face(bold: $0.0, italic: $0.1, size: style.textSize)
         }
         regular = faces[0]
-        code = style.code()
+        let codeFace = style.code()
+        code = codeFace
         codeBold = style.code(bold: true)
+        charWidth = style.codeCharWidth
+        spaceWidth = (" " as NSString).size(withAttributes: [.font: codeFace]).width
     }
 
     private func face(bold: Bool, italic: Bool) -> UIFont {
@@ -226,14 +277,14 @@ struct MobMdRenderer {
     private static let tagPattern = try! NSRegularExpression(pattern: "^<(/?)([a-zA-Z][a-zA-Z0-9]*)[^>]*?(/?)>$")
     private static let anyTag = try! NSRegularExpression(pattern: "<[^>]*>")
 
-    func render(_ markdown: String) -> NSAttributedString {
+    func render(_ markdown: String) -> [MobMdSegment] {
         let options = AttributedString.MarkdownParsingOptions(
             allowsExtendedAttributes: false,
             interpretedSyntax: .full,
             failurePolicy: .returnPartiallyParsedIfPossible
         )
         guard let parsed = try? AttributedString(markdown: markdown, options: options) else {
-            return NSAttributedString(string: markdown, attributes: base())
+            return [.text(NSAttributedString(string: markdown, attributes: base()))]
         }
         var state = State()
         for run in parsed.runs {
@@ -241,13 +292,28 @@ struct MobMdRenderer {
         }
         flushTable(&state)
         endBlock(&state)
-        return state.out
+        closeText(&state)
+        return state.segments
+    }
+
+    /// Ends the prose so far as a segment of its own (before a table or a rule).
+    private func closeText(_ state: inout State) {
+        let out = state.out
+        let newline = UInt16(UnicodeScalar("\n").value)
+        while out.length > 0, (out.string as NSString).character(at: out.length - 1) == newline {
+            out.deleteCharacters(in: NSRange(location: out.length - 1, length: 1))
+        }
+        if out.length > 0 { state.segments.append(.text(out)) }
+        state.out = NSMutableAttributedString()
+        state.blockStart = 0
     }
 
     // ── one pass over the runs ──
 
     private struct State {
-        let out = NSMutableAttributedString()
+        var out = NSMutableAttributedString()  // the prose segment on the go
+        var segments: [MobMdSegment] = []
+        var ruled: Int?             // the rule block already added
         var block: Int?             // identity of the innermost block on the go
         var blockStart = 0
         var blockKind: BlockKind = .paragraph
@@ -308,9 +374,11 @@ struct MobMdRenderer {
             piece = piece.replacingOccurrences(of: "\n", with: "\u{2028}")
         }
         if case .rule = state.blockKind {
-            state.out.append(NSAttributedString(
-                string: String(repeating: "─", count: columns),
-                attributes: base(color: style.ruleColor, font: code)))
+            if state.ruled != state.block {
+                state.ruled = state.block
+                closeText(&state)
+                state.segments.append(.rule)
+            }
             return
         }
         state.out.append(NSAttributedString(string: piece, attributes: inlineAttributes(inline, link: run.link, state: state)))
@@ -325,9 +393,12 @@ struct MobMdRenderer {
         }
         if state.block != nil {
             endBlock(&state)
-            // Items of one list sit line by line; other blocks get a blank line.
+            // Items of one list sit line by line; other blocks get a blank
+            // line (none at the top of a segment).
             let tight = !lists.isEmpty && lists.last == state.lists.last
-            state.out.append(NSAttributedString(string: tight ? "\n" : "\n\n", attributes: base()))
+            if state.out.length > 0 {
+                state.out.append(NSAttributedString(string: tight ? "\n" : "\n\n", attributes: base()))
+            }
         }
         state.block = identity
         state.lists = lists
@@ -386,7 +457,6 @@ struct MobMdRenderer {
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineHeightMultiple = style.lineHeight
         paragraph.headIndent = state.indent
-        if case .rule = state.blockKind { paragraph.lineBreakMode = .byClipping }
         state.out.addAttribute(.paragraphStyle, value: paragraph, range: range)
     }
 
@@ -470,7 +540,12 @@ struct MobMdRenderer {
                               table: PresentationIntent.IntentType, state: inout State) {
         if state.table?.identity != table.identity {
             flushTable(&state)
-            beginBlock(table.identity, components: Array(components.drop { $0.identity != table.identity }), state: &state)
+            // A table is a segment of its own, in its own scroller.
+            endBlock(&state)
+            closeText(&state)
+            state.block = table.identity
+            state.blockKind = .table
+            state.lists = []
             guard case let .table(columns) = table.kind else { return }
             state.table = Table(identity: table.identity, alignments: columns.map(\.alignment))
         }
@@ -512,21 +587,19 @@ struct MobMdRenderer {
     private func flushTable(_ state: inout State) {
         guard let table = state.table else { return }
         state.table = nil
-        state.out.append(layoutTable(table))
+        state.segments.append(.table(layoutTable(table)))
     }
 
-    /// The table as box-drawing lines, columns shrunk widest-first to fit
-    /// the view and cells wrapped inside them.
+    /// The table as box-drawing lines at its natural width: a column as wide
+    /// as its widest cell up to maxColumn, longer cells wrapped inside it.
+    /// Widths are measured in points and padded to whole code columns, so a
+    /// cell in a face other than the code face (Hebrew, emoji fall back)
+    /// still lines up.
     private func layoutTable(_ table: Table) -> NSAttributedString {
         let count = max(table.alignments.count, (table.rows.flatMap { $0.cells.keys }.max() ?? -1) + 1)
         guard count > 0 else { return NSAttributedString() }
-        var widths = (0..<count).map { column in
-            max(1, table.rows.map { $0.cells[column]?.length ?? 0 }.max() ?? 0)
-        }
-        let available = max(count, columns - (3 * count + 1))
-        while widths.reduce(0, +) > available, let widest = widths.indices.max(by: { widths[$0] < widths[$1] }),
-              widths[widest] > 1 {
-            widths[widest] -= 1
+        let widths = (0..<count).map { column in
+            min(Self.maxColumn, max(1, table.rows.map { row in row.cells[column].map(codeColumns) ?? 0 }.max() ?? 0))
         }
 
         let border = base(color: style.ruleColor, font: code)
@@ -565,50 +638,92 @@ struct MobMdRenderer {
         }
         rule("└", "┴", "┘")
 
-        // A line a hair too wide must clip, not wrap and break the box.
+        // Never wrapped (the scroller gives it its own width); a row starting
+        // with a right-to-left cell must not turn the line round.
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineBreakMode = .byClipping
+        paragraph.baseWritingDirection = .leftToRight
         out.addAttribute(.paragraphStyle, value: paragraph, range: NSRange(location: 0, length: out.length))
         return out
     }
 
-    /// Greedy word wrap at `width` characters (UTF-16 units: wide emoji
-    /// count two, close to their two-column width).
+    /// The drawn width of a line in points, trailing spaces left out.
+    private func measure(_ text: NSAttributedString) -> CGFloat {
+        guard text.length > 0 else { return 0 }
+        let line = CTLineCreateWithAttributedString(text)
+        return CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil) - CTLineGetTrailingWhitespaceWidth(line))
+    }
+
+    /// How many code columns a cell's text needs.
+    private func codeColumns(_ text: NSAttributedString) -> Int {
+        Int((measure(text) / charWidth - 0.01).rounded(.up))
+    }
+
+    /// Greedy word wrap at `width` code columns, measured in points; a word
+    /// longer than the column breaks between characters.
     private func wrap(_ cell: NSAttributedString, width: Int) -> [NSAttributedString] {
         let string = cell.string as NSString
+        guard string.length > 0 else { return [] }
+        let limit = Double(CGFloat(width) * charWidth) + 0.5
+        let typesetter = CTTypesetterCreateWithAttributedString(cell)
         let space = UInt16(UnicodeScalar(" ").value)
         var lines: [NSAttributedString] = []
         var start = 0
         while start < string.length {
             while start < string.length, string.character(at: start) == space { start += 1 }
             guard start < string.length else { break }
-            if string.length - start <= width {
-                lines.append(cell.attributedSubstring(from: NSRange(location: start, length: string.length - start)))
-                break
-            }
-            var cut = start + width
-            var index = cut
-            while index > start, string.character(at: index) != space { index -= 1 }
-            if index > start { cut = index }
-            lines.append(cell.attributedSubstring(from: NSRange(location: start, length: cut - start)))
-            start = cut
+            var length = CTTypesetterSuggestLineBreak(typesetter, start, limit)
+            if length < 1 { length = CTTypesetterSuggestClusterBreak(typesetter, start, limit) }
+            if length < 1 { length = string.rangeOfComposedCharacterSequence(at: start).length }
+            var end = min(string.length, start + length)
+            let next = end
+            while end > start, string.character(at: end - 1) == space { end -= 1 }
+            lines.append(cell.attributedSubstring(from: NSRange(location: start, length: end - start)))
+            start = next
         }
         return lines
     }
 
     private func pad(_ text: NSAttributedString, to width: Int, alignment: PresentationIntent.TableColumn.Alignment,
                      space: [NSAttributedString.Key: Any]) -> NSAttributedString {
-        let missing = max(0, width - text.length)
-        let left: Int
+        let missing = max(0, CGFloat(width) * charWidth - measure(text))
+        let left: CGFloat
         switch alignment {
         case .right: left = missing
-        case .center: left = missing / 2
+        case .center: left = (missing / 2).rounded(.down)
         default: left = 0
         }
-        let out = NSMutableAttributedString(string: String(repeating: " ", count: left), attributes: space)
-        out.append(text)
-        out.append(NSAttributedString(string: String(repeating: " ", count: missing - left), attributes: space))
+        let out = NSMutableAttributedString(attributedString: gap(left, space: space))
+        out.append(isolated(text, space: space))
+        out.append(gap(missing - left, space: space))
         return out
+    }
+
+    /// Spaces exactly `points` wide: whole spaces, the last kerned by the rest.
+    private func gap(_ points: CGFloat, space: [NSAttributedString.Key: Any]) -> NSAttributedString {
+        guard points > 0.25 else { return NSAttributedString() }
+        let count = max(1, Int((points / spaceWidth).rounded(.down)))
+        let out = NSMutableAttributedString(string: String(repeating: " ", count: count), attributes: space)
+        out.addAttribute(.kern, value: points - CGFloat(count) * spaceWidth, range: NSRange(location: count - 1, length: 1))
+        return out
+    }
+
+    /// A cell with right-to-left text in a bidi isolate, so it stays inside
+    /// its column instead of trading places with a neighbouring cell.
+    private func isolated(_ text: NSAttributedString, space: [NSAttributedString.Key: Any]) -> NSAttributedString {
+        guard text.string.unicodeScalars.contains(where: Self.rightToLeft) else { return text }
+        let out = NSMutableAttributedString(string: "\u{2068}", attributes: space)
+        out.append(text)
+        out.append(NSAttributedString(string: "\u{2069}", attributes: space))
+        return out
+    }
+
+    /// Hebrew, Arabic, Syriac, Thaana, NKo and their presentation forms.
+    private static func rightToLeft(_ scalar: Unicode.Scalar) -> Bool {
+        switch scalar.value {
+        case 0x0590...0x08FF, 0xFB1D...0xFDFF, 0xFE70...0xFEFF, 0x10800...0x10FFF, 0x1E800...0x1EFFF: true
+        default: false
+        }
     }
 }
 

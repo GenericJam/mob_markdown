@@ -19,8 +19,13 @@ MobMarkdown.view(:reply, """
 
 | Platform | Renderer |
 |--|--|
-| Android | [Markwon](https://github.com/noties/Markwon) 4.6.2 in a selectable `TextView`. Tables: Markwon's table plugin splits the width evenly between the columns and wraps each cell inside its column, so a wide table grows taller, never wider than the view. |
-| iOS | Foundation's `AttributedString(markdown:)` in a read-only selectable `UITextView` (TextKit 1). UIKit has no table layout for attributed text, so tables are box-drawing text in the code face, columns shrunk widest-first to the view's width and cells wrapped inside them. |
+| Android | [Markwon](https://github.com/noties/Markwon) 4.6.2 in selectable `TextView`s. The text is cut at its tables: the prose wraps to the view's width, and each table (Markwon's table plugin, columns split evenly) sits at its natural width, at least the view's, in a horizontal scroller of its own. A table wider than the view scrolls sideways; a narrower one fills the width and doesn't scroll. |
+| iOS | Foundation's `AttributedString(markdown:)` in read-only selectable `UITextView`s (TextKit 1), cut the same way. UIKit has no table layout for attributed text, so a table is box-drawing text in the code face at its natural width, in a horizontal `ScrollView`. |
+
+On both, a column grows to its widest cell up to 32 code columns, past
+which its cells wrap; a horizontal swipe on a table scrolls it, a vertical
+one scrolls the screen. Selection works within one block of prose or one
+table, not across them.
 
 ## Props
 

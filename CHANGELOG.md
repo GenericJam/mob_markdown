@@ -10,10 +10,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 - `MobMarkdown.view/3` and `MobMarkdown.View`: a native Markdown view,
   extracted from Operator's. Android: Markwon 4.6.2 (tables, strikethrough,
-  autolinks, inline HTML) in a selectable `TextView`, tables wrapping their
-  cells to the view's width. iOS: Foundation's Markdown parser in a
-  read-only selectable `UITextView`, tables as box-drawing text in the code
-  face fitted to the view's width.
+  autolinks, inline HTML) in selectable `TextView`s. iOS: Foundation's
+  Markdown parser in read-only selectable `UITextView`s, tables as
+  box-drawing text in the code face (measured in points, so Hebrew cells
+  line up; right-to-left cells isolated).
+- Tables scroll sideways: the prose wraps to the view's width, and each
+  table sits at its natural width (a column up to 32 code columns, longer
+  cells wrapping) in a horizontal scroller of its own; a table narrower
+  than the view doesn't scroll. Links inside Android table cells are
+  tappable.
 - Style props: sizes, colours (ARGB), and six faces (regular, bold, italic,
   bold italic, heading, code) by platform name; a missing italic is
   slanted from the upright face; code defaults to the system monospace.

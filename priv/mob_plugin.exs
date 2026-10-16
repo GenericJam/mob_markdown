@@ -50,7 +50,9 @@
     ]
   },
   ios: %{
-    swift_files: ["priv/native/ios/MobMarkdownView.swift"]
+    swift_files: ["priv/native/ios/MobMarkdownView.swift"],
+    # Table cells are measured and wrapped with CoreText's typesetter.
+    frameworks: ["CoreText"]
   },
   host_requirements: [
     "mob_dev >= 0.7.29: the generated MobPluginBootstrap (Android) and " <>

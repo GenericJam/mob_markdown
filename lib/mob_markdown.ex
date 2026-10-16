@@ -9,13 +9,14 @@ defmodule MobMarkdown do
         text_color: 0xFF1E1A16
       )
 
-  Android renders with [Markwon](https://github.com/noties/Markwon) in a
-  selectable `TextView`; tables are drawn by Markwon's table plugin and wrap
-  their cells to the view's width. iOS parses with Foundation's
-  `AttributedString(markdown:)` into a read-only selectable `UITextView`;
+  Android renders with [Markwon](https://github.com/noties/Markwon) in
+  selectable `TextView`s. iOS parses with Foundation's
+  `AttributedString(markdown:)` into read-only selectable `UITextView`s;
   UIKit has no table layout for attributed text, so tables are box-drawing
-  text in the code face, columns shrunk to the view's width and cells
-  wrapped inside them.
+  text in the code face. On both, the prose wraps to the view's width and
+  each table sits at its natural width (a column up to 32 code columns) in a
+  horizontal scroller of its own: a table wider than the view scrolls
+  sideways.
 
   ## Props
 
