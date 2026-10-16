@@ -224,7 +224,12 @@ internal object MobMarkdown {
         val out = mutableListOf<MdSegment>()
         var prose: Document? = null
         fun closeProse() {
-            prose?.let { out.add(MdSegment.Prose(prose(markwon, style, it), key(it))) }
+            prose?.let {
+                // A table nested in a quote or list keeps its cells' links out
+                // of dropBareDomainLinks' reach too: no Linkify there either.
+                val nested = hasTable(it)
+                out.add(MdSegment.Prose(prose(markwon(context, style, linkify = !nested), style, it), key(it)))
+            }
             prose = null
         }
         for (node in generateSequence(doc.firstChild) { it.next }.toList()) {
@@ -293,24 +298,33 @@ internal object MobMarkdown {
         return ((widest + padding) * widths.size).toInt() + px(1f).toInt() + 1
     }
 
-    // What a segment shows, as its nodes and their text: the rendered string
-    // alone misses a table cell growing in place (a row is one no-break space
-    // drawn by its span) and a span-only change.
+    private fun hasTable(node: Node): Boolean =
+        node is TableBlock || generateSequence(node.firstChild) { it.next }.any(::hasTable)
+
+    // A segment's key: everything its nodes render from (kind, text,
+    // attributes). The rendered string alone misses a table cell growing in
+    // place (a row is one no-break space drawn by its span) and span-only
+    // changes.
     private fun key(node: Node): String {
         val out = StringBuilder()
         fun walk(n: Node) {
             out.append('<').append(n.javaClass.simpleName)
-            when (n) {
-                is Text -> out.append(':').append(n.literal)
-                is Code -> out.append(':').append(n.literal)
-                is org.commonmark.node.FencedCodeBlock -> out.append(':').append(n.literal)
-                is org.commonmark.node.IndentedCodeBlock -> out.append(':').append(n.literal)
-                is org.commonmark.node.HtmlInline -> out.append(':').append(n.literal)
-                is org.commonmark.node.HtmlBlock -> out.append(':').append(n.literal)
-                is org.commonmark.node.Link -> out.append(':').append(n.destination)
-                is Heading -> out.append(':').append(n.level)
-                else -> {}
+            val attributes: List<Any?> = when (n) {
+                is Text -> listOf(n.literal)
+                is Code -> listOf(n.literal)
+                is org.commonmark.node.FencedCodeBlock -> listOf(n.info, n.literal)
+                is org.commonmark.node.IndentedCodeBlock -> listOf(n.literal)
+                is org.commonmark.node.HtmlInline -> listOf(n.literal)
+                is org.commonmark.node.HtmlBlock -> listOf(n.literal)
+                is org.commonmark.node.Link -> listOf(n.destination, n.title)
+                is org.commonmark.node.Image -> listOf(n.destination, n.title)
+                is Heading -> listOf(n.level)
+                is org.commonmark.node.OrderedList -> listOf(n.startNumber, n.delimiter, n.isTight)
+                is org.commonmark.node.BulletList -> listOf(n.bulletMarker, n.isTight)
+                is org.commonmark.ext.gfm.tables.TableCell -> listOf(n.isHeader, n.alignment)
+                else -> emptyList()
             }
+            for (a in attributes) out.append('\u0000').append(a)
             generateSequence(n.firstChild) { it.next }.forEach(::walk)
             out.append('>')
         }
