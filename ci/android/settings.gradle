@@ -1,0 +1,5 @@
+// CI only: compiles priv/native/android/MobMarkdown.kt as an Android library
+// with the versions mob_new's app template uses (AGP 8.2, Kotlin 1.9.22,
+// Compose BOM 2024.02) and the manifest's Markwon deps. The host app's own
+// build is what ships it; this catches a file that no longer compiles.
+rootProject.name = 'mob_markdown_ci'
